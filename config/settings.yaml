@@ -1,0 +1,88 @@
+# Every value here can be overridden by a CLI flag. See README.md.
+
+tier:
+  # 0 = Model A (every card tracked). Raise to e.g. 1.00 to switch to Model C.
+  threshold_usd: 0
+  # Rows below the threshold fall into the first bucket whose rarities and finish match.
+  # Prices are placeholders until the first live run is evaluated (open decision).
+  bulk_buckets:
+    - { name: "Bulk Common/Uncommon", rarities: [common, uncommon], finish: nonfoil, price: 0.25 }
+    - { name: "Bulk Common/Uncommon", rarities: [common, uncommon], finish: foil,    price: 0.50 }
+    - { name: "Bulk Rare/Mythic",     rarities: [rare, mythic],     finish: nonfoil, price: 1.00 }
+    - { name: "Bulk Rare/Mythic",     rarities: [rare, mythic],     finish: foil,    price: 2.00 }
+
+sku:
+  # Non-English printings get their own SKU (`-ja`, `-it`, ...) and variation name suffix.
+  include_language: true
+
+square:
+  # The account's location, as the Locations API reports it (verified 2026-10-18). The
+  # template's columns said "The Warp Gate", which this account has no location by, so the
+  # Dashboard import silently ignored every quantity and stock-alert column.
+  location_name: "Provenance Learning, inc"
+  # api = stock counts and alerts go through `mtgsync inventory` (Inventory API, by location
+  # ID); the CSV leaves its quantity/alert columns blank. csv = write them into the CSV and
+  # rely on the Dashboard import (needs the location name above to match the header).
+  inventory_via: api
+  category: "MTG Singles"
+  variation_cap: 250
+  # Sets every "Tax - ..." column in the template to Y (true), N (false) or leaves it blank (null).
+  taxable: false
+  # Workflow: Moxfield is the intake log and is wiped after every successful import, so
+  # each export holds only new stock. "add" writes New Quantity = Square's current quantity
+  # (from the export passed with --square-export) + the Moxfield count. "set" writes the
+  # Moxfield count as the absolute stock (Moxfield as the full system of record).
+  quantity_mode: add
+  # Low-stock alert per variation: Square flags it once quantity is at or below this count.
+  # A number enables the alert with that threshold; null writes Stock Alert Enabled = N.
+  stock_alert_count: 4
+  # Path to the blank import template downloaded from Items > Item library > Actions > Import.
+  # Only its header row is used: the output has that header on line 1 and data from line 2.
+  template: square-template.xlsx
+  # csv is what Square's importer accepted (Oct 2026); xlsx files written by openpyxl were
+  # rejected with "add a header to column N". Upload the csv as-is; never open and re-save
+  # it in a spreadsheet tool, which can mangle SKUs.
+  format: csv
+  # xlsx only: true writes into a copy of the template (instruction rows kept).
+  keep_template_rows: false
+
+pricing:
+  # none     = Price column left blank; variations import as variable-priced and prices are
+  #            set in Square (current choice).
+  # scryfall = Scryfall market price by finish, run through the rule below.
+  # scg      = Star City Games (opt-in scraper; fetcher not implemented yet).
+  source: none
+  markup: 1.0
+  round_to: 0.25
+  # Scryfall prices are for NM. Multipliers applied to base_price by condition before markup.
+  # Defaults are all 1.0 (no adjustment) until the condition policy is decided.
+  condition_multipliers: { NM: 1.0, LP: 1.0, MP: 1.0, HP: 1.0, DMG: 1.0 }
+  scg:
+    enabled: false
+    rate_limit_seconds: 2
+    max_cards: 200
+    cache_ttl_hours: 168
+
+scryfall:
+  cache_ttl_hours: 24
+  # default_cards has one object per card (English, or the printed language when that is
+  # the only one); non-English Moxfield rows fall back to the English object. Switch to
+  # all_cards (much larger) if you need per-language objects.
+  bulk_type: default_cards
+  user_agent: "mtgsync/0.1 (Moxfield->Square collection sync)"
+
+moxfield:
+  # Moxfield is the intake log: export, import to Square, then delete the rows from the
+  # Moxfield collection so the next export only carries new stock (see square.quantity_mode).
+  # If true, Tradelist Count is subtracted from Count (trade stock held back).
+  # Leave false for this collection: every row has Tradelist Count == Count, so
+  # subtracting would zero everything out.
+  subtract_tradelist: false
+  # Drop rows whose Language is not English (open decision; default keeps them).
+  english_only: false
+
+paths:
+  cache: cache
+  work: work
+  output: output
+  state: state

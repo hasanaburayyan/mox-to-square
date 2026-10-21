@@ -1,0 +1,5 @@
+# Moxfield set code -> Scryfall set code, for the handful of promo sets that differ.
+# Add entries here as rows show up in output/unmatched.csv. Keys and values are lowercase.
+# Example:
+#   plst: plist
+{}
