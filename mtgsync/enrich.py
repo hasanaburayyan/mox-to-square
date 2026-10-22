@@ -65,6 +65,11 @@ def enrich_rows(rows: list[MoxfieldRow], index: ScryfallIndex, settings: Setting
             # has no own object. Same set + number is the same printing: use the English
             # object and keep the row's language on the record.
             card = index.lookup(set_code, row.collector_number, "en")
+            if card is None:
+                # Sets with no English printing (Foreign Black Border, Renaissance,
+                # Rinascimento) have their one object in another language, e.g. French
+                # for FBB. A German FBB row must still match that printing.
+                card = index.lookup_any_language(set_code, row.collector_number)
             lang_fallback = card is not None
             if lang_fallback:
                 stats.lang_fallbacks += 1

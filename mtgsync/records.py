@@ -30,7 +30,7 @@ class Record:
     collector_number: str = ""
     rarity: str = ""
     lang: str = "en"
-    lang_fallback: bool = False     # True when a non-English row was matched to the English object
+    lang_fallback: bool = False     # True when a non-English row was matched to an object in another language
     type_line: str = ""
     prices: dict[str, Any] | None = None
     image_uri: str | None = None

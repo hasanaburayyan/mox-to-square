@@ -200,6 +200,11 @@ class ScryfallIndex:
     def __init__(self, cards: Iterable[dict[str, Any]]):
         self._by_key: dict[tuple[str, str, str], ScryfallCard] = {}
         self._by_id: dict[str, ScryfallCard] = {}
+        # (set, collector_number) -> the objects for that printing, in file order. Lets a
+        # row match a printing that has no object in its own language and none in English
+        # (Foreign Black Border, Renaissance, Rinascimento: default_cards carries one
+        # non-English object per card there).
+        self._by_printing: dict[tuple[str, str], list[ScryfallCard]] = {}
         for c in cards:
             card = ScryfallCard(
                 id=c["id"], name=c["name"], set=c["set"], set_name=c["set_name"],
@@ -209,6 +214,7 @@ class ScryfallIndex:
             )
             self._by_key[card.key] = card
             self._by_id[card.id] = card
+            self._by_printing.setdefault((card.set, card.collector_number), []).append(card)
 
     def __len__(self) -> int:
         return len(self._by_key)
@@ -216,9 +222,19 @@ class ScryfallIndex:
     def lookup(self, set_code: str, collector_number: str, lang: str = "en") -> ScryfallCard | None:
         return self._by_key.get((set_code.lower(), collector_number, lang))
 
+    def lookup_any_language(self, set_code: str, collector_number: str) -> ScryfallCard | None:
+        """The object for this printing in whatever language the bulk file has it.
+
+        English first if present, then the first object in file order. For a set with no
+        English printing this is the only way a row in another language can match.
+        """
+        cards = self._by_printing.get((set_code.lower(), collector_number))
+        if not cards:
+            return None
+        return next((c for c in cards if c.lang == "en"), cards[0])
+
     def languages_for(self, set_code: str, collector_number: str) -> list[str]:
-        set_code = set_code.lower()
-        return sorted(k[2] for k in self._by_key if k[0] == set_code and k[1] == collector_number)
+        return sorted(c.lang for c in self._by_printing.get((set_code.lower(), collector_number), []))
 
     def by_id(self, scryfall_id: str) -> ScryfallCard | None:
         return self._by_id.get(scryfall_id)
