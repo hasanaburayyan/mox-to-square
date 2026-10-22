@@ -53,7 +53,8 @@ Then:
 .venv/Scripts/mtgsync build [--square-export input/square_export.xlsx] [--zero-missing]
 .venv/Scripts/mtgsync build --limit-items 20 --category "MTG Singles TEST" --tag test   # small test import
 .venv/Scripts/mtgsync inventory [--dry-run] [--quantity-mode add|set]   # stock counts via API, needs .env
-.venv/Scripts/mtgsync images [--dry-run]               # stage 4, needs .env
+.venv/Scripts/mtgsync images [--dry-run] [--no-variations]   # stage 4, needs .env
+.venv/Scripts/mtgsync backfill-images [--dry-run] [--category NAME | --all-categories]   # images for stock already in Square
 .venv/Scripts/mtgsync dedupe [--dry-run]               # remove duplicate variations after a tokenless re-import
 .venv/Scripts/mtgsync upload <moxfield.csv> [--dry-run] [--force]   # the one-click path (what the exe does)
 .venv/Scripts/mtgsync gui                              # the window, from the venv
@@ -127,6 +128,14 @@ inventory instead, set `square.quantity_mode: set`; `--zero-missing` only applie
    with the object's `version` kept so a stale write is rejected rather than clobbering. The
    printing-to-image map is in `state/variation_images.json`. `--no-variations` skips this
    pass; `--dry-run` lists what would be uploaded and attached.
+
+**Stock uploaded before images existed**: `mtgsync backfill-images [--dry-run] [--category NAME |
+--all-categories]`, or the window's "Add missing card images" button, reads the Square library,
+works out each variation's printing from its SKU (`<set>-<number>-<finish>-<condition>[-<lang>]`),
+and runs the same two passes over everything in the chosen category that has no image yet. The
+window lists the account's categories to pick from; the command defaults to `square.category`.
+Items and variations that already carry an image are left alone, so it is safe to repeat.
+SKUs not in mtgsync's format (other products) are skipped and listed in the log.
 
 Square shows a variation's image in Square Online and the Dashboard when that variation is
 selected. Whether the Point of Sale app shows it in its variation picker depends on the app;

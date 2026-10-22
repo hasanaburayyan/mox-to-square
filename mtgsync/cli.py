@@ -230,6 +230,28 @@ def cmd_images(args: argparse.Namespace, settings: Settings | None = None) -> in
     return 1 if errors else 0
 
 
+def cmd_backfill_images(args: argparse.Namespace, settings: Settings | None = None) -> int:
+    from .backfill import run_backfill
+    from .square_images import SquareClient, load_dotenv
+
+    s = settings or _settings(args)
+    load_dotenv(s.root / ".env")
+    token = os.environ.get("SQUARE_ACCESS_TOKEN", "")
+    if not token:
+        _say("SQUARE_ACCESS_TOKEN is not set (.env)")
+        return 2
+    client = SquareClient(token, os.environ.get("SQUARE_ENV", "sandbox"))
+    _say(f"Square environment: {client.env}")
+    category = "" if args.all_categories else args.category
+    report = run_backfill(s, client, category=category, dry_run=bool(args.dry_run),
+                          offline=bool(args.offline), log=_say)
+    _say(f"Backfill{' (dry run)' if report.dry_run else ''}: {report.variations_matched}/{report.variations_seen} "
+         f"variations matched; item images uploaded {report.item_images.uploaded}; printing scans uploaded "
+         f"{report.variation_images.uploaded}, variations given an image {report.variation_images.attached}; "
+         f"{len(report.skipped)} skipped, {len(report.errors)} errors")
+    return 1 if report.errors else 0
+
+
 def cmd_inventory(args: argparse.Namespace, settings: Settings | None = None) -> int:
     from .square_images import SquareClient, load_dotenv
     from .square_inventory import run_inventory
@@ -371,6 +393,15 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--no-variations", action="store_true",
                     help="item images only; skip the per-variation (per printing) images")
     sp.set_defaults(func=cmd_images)
+
+    sp = sub.add_parser("backfill-images",
+                        help="Add missing images to what is already in Square, from the SKUs (no Moxfield file)")
+    sp.add_argument("--dry-run", action="store_true")
+    sp.add_argument("--offline", action="store_true", help="never download Scryfall bulk data")
+    sp.add_argument("--category", default=None, metavar="NAME",
+                    help="only items in this (reporting) category (default: square.category in settings)")
+    sp.add_argument("--all-categories", action="store_true", help="every item in the library")
+    sp.set_defaults(func=cmd_backfill_images)
 
     sp = sub.add_parser("inventory", help="Set or add stock counts through the Inventory API")
     sp.add_argument("--dry-run", action="store_true")

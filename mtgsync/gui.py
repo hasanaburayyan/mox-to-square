@@ -93,6 +93,79 @@ class SquareSettingsDialog(tk.Toplevel):
         self.destroy()
 
 
+class BackfillDialog(tk.Toplevel):
+    """Pick the Square category whose items get their missing images, then start."""
+
+    ALL = "(every item in the library)"
+
+    def __init__(self, parent: tk.Tk, client, default_category: str, on_start):
+        super().__init__(parent)
+        self.title("Add missing card images")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+        self.on_start = on_start
+
+        frm = ttk.Frame(self, padding=14)
+        frm.pack(fill="both", expand=True)
+        ttk.Label(frm, text="Which items should get images?", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, sticky="w")
+        ttk.Label(frm, foreground="#666", wraplength=440, justify="left", text=(
+            "Every item and variation in the chosen category that has no image yet gets its card scan, "
+            "worked out from the SKU. Items that already have an image are left alone.")
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 8))
+        ttk.Label(frm, text="Category").grid(row=2, column=0, sticky="w")
+        self.cat_var = tk.StringVar(value=default_category or self.ALL)
+        self.combo = ttk.Combobox(frm, textvariable=self.cat_var, values=["loading…"], state="readonly", width=44)
+        self.combo.grid(row=3, column=0, columnspan=2, sticky="we")
+        self.note = ttk.Label(frm, text="Loading categories from Square…", foreground="#666", wraplength=440)
+        self.note.grid(row=4, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        btns = ttk.Frame(frm)
+        btns.grid(row=5, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        self.start_btn = ttk.Button(btns, text="Start", command=self.start, state="disabled")
+        self.start_btn.pack(side="left")
+        ttk.Button(btns, text="Cancel", command=self.destroy).pack(side="left", padx=6)
+
+        # The worker thread only puts on the queue; all widget changes happen on the Tk thread.
+        self._q: queue.Queue = queue.Queue()
+        self._default_category = default_category
+
+        def work():
+            try:
+                from .backfill import category_names
+                self._q.put(("ok", category_names(client)))
+            except Exception as exc:  # noqa: BLE001
+                self._q.put(("error", str(exc)[:300]))
+        threading.Thread(target=work, daemon=True).start()
+        self.after(50, self._poll)
+
+    def _poll(self) -> None:
+        try:
+            kind, payload = self._q.get_nowait()
+        except queue.Empty:
+            if self.winfo_exists():
+                self.after(50, self._poll)
+            return
+        if kind == "ok":
+            self._loaded(payload, self._default_category)
+        else:
+            self.note.config(text=f"Could not list categories: {payload}", foreground="#b00")
+
+    def _loaded(self, names: list[str], default_category: str) -> None:
+        values = [self.ALL] + names
+        self.combo.config(values=values)
+        match = next((n for n in names if n.lower() == (default_category or "").lower()), None)
+        self.cat_var.set(match or self.ALL)
+        self.note.config(text=f"{len(names)} categories in this Square account."
+                         + ("" if match or not default_category else
+                            f" The configured category {default_category!r} is not one of them."))
+        self.start_btn.config(state="normal")
+
+    def start(self) -> None:
+        choice = self.cat_var.get()
+        self.destroy()
+        self.on_start("" if choice == self.ALL else choice)
+
+
 class App:
     def __init__(self, root: tk.Tk):
         self.root = root
@@ -127,7 +200,10 @@ class App:
         ttk.Checkbutton(opts, text="Force (re-add a batch already uploaded)", variable=self.force).pack(side="left", padx=16)
 
         self.upload_btn = ttk.Button(frm, text="Upload to Square", command=self.start, state="disabled")
-        self.upload_btn.pack(fill="x", pady=10)
+        self.upload_btn.pack(fill="x", pady=(10, 4))
+        self.backfill_btn = ttk.Button(frm, text="Add missing card images to Square (for stock uploaded earlier)",
+                                       command=self.start_backfill)
+        self.backfill_btn.pack(fill="x", pady=(0, 10))
 
         self.status = ttk.Label(frm, text=f"Folder: {self.project_root}", foreground="#666")
         self.status.pack(fill="x")
@@ -182,6 +258,47 @@ class App:
             self.q.put("ERROR: " + str(exc))
         self.q.put(("__done__", report))  # type: ignore[arg-type]
 
+    def start_backfill(self) -> None:
+        if self.busy:
+            return
+        if not square_credentials(self.project_root)[0]:
+            messagebox.showwarning("Square settings", "Add your Square access token first (Square settings…).")
+            return
+        from .pipeline import make_client
+        settings = load_settings(root=self.project_root)
+        try:
+            client = make_client(settings)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Square", str(exc))
+            return
+        BackfillDialog(self.root, client, str(settings.get("square.category", "") or ""),
+                       lambda category: self._run_backfill(client, category))
+
+    def _run_backfill(self, client, category: str) -> None:
+        dry = self.dry.get()
+        where = f"the category {category!r}" if category else "every item in the library"
+        if not dry and not messagebox.askokcancel(
+                "Add missing images",
+                f"Attach card images to every item and variation in {where} that has none yet?\n\n"
+                "Nothing else is changed; items and variations that already have an image are left alone."):
+            return
+        self.busy = True
+        self.upload_btn.config(state="disabled")
+        self.backfill_btn.config(state="disabled")
+        self.set_log("")
+        self.status.config(text="Working…")
+        threading.Thread(target=self.work_backfill, args=(client, category, dry), daemon=True).start()
+
+    def work_backfill(self, client, category: str, dry: bool) -> None:
+        from .backfill import BackfillReport, run_backfill
+        try:
+            settings = load_settings(root=self.project_root)
+            report = run_backfill(settings, client, category=category, dry_run=dry, log=self.q.put)
+        except Exception as exc:  # noqa: BLE001
+            report = BackfillReport(dry_run=dry, errors=[f"{type(exc).__name__}: {exc}"])
+            self.q.put("ERROR: " + str(exc))
+        self.q.put(("__backfill_done__", report))  # type: ignore[arg-type]
+
     # --- ui plumbing -----------------------------------------------------------------------
 
     def drain(self) -> None:
@@ -190,15 +307,38 @@ class App:
                 msg = self.q.get_nowait()
                 if isinstance(msg, tuple) and msg[0] == "__done__":
                     self.finish(msg[1])
+                elif isinstance(msg, tuple) and msg[0] == "__backfill_done__":
+                    self.finish_backfill(msg[1])
                 else:
                     self.append(str(msg))
         except queue.Empty:
             pass
         self.root.after(100, self.drain)
 
+    def finish_backfill(self, r) -> None:
+        self.busy = False
+        self.backfill_btn.config(state="normal")
+        if self.csv_path:
+            self.upload_btn.config(state="normal")
+        summary = (f"{r.variations_matched} of {r.variations_seen} variations matched to a printing.\n"
+                   f"Item images uploaded: {r.item_images.uploaded}   already had one: {r.item_images.already_done}\n"
+                   f"Printing scans uploaded: {r.variation_images.uploaded}   "
+                   f"variations given an image: {r.variation_images.attached}\n"
+                   f"Skipped: {len(r.skipped)} (see log)")
+        if r.ok and r.dry_run:
+            self.status.config(text="Dry run finished. Nothing changed.")
+            messagebox.showinfo("Dry run", "Would do:\n\n" + summary)
+        elif r.ok:
+            self.status.config(text="Done.")
+            messagebox.showinfo("Images added", summary)
+        else:
+            self.status.config(text="Finished with errors.")
+            messagebox.showerror("Adding images failed", "\n".join(r.errors)[:1500])
+
     def finish(self, r: UploadReport) -> None:
         self.busy = False
         self.upload_btn.config(state="normal")
+        self.backfill_btn.config(state="normal")
         if r.dry_run and r.ok:
             self.status.config(text="Dry run finished. Nothing changed.")
             messagebox.showinfo("Dry run", f"{r.items_total} items, {r.variations_total} variations, "

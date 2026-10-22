@@ -28,6 +28,11 @@ MTG Sync $version  (Moxfield -> Square)
    The first run downloads about 80 MB of card data from Scryfall.
 5. Clear the Moxfield collection after every successful upload.
 
+Card images: every upload attaches a scan to each new item and to each variation (printing).
+For stock that was uploaded before this version, click "Add missing card images to Square",
+pick the category (e.g. MTG Singles), and it fills in images for everything that has none.
+Tick "Dry run" first to see what it would do. Safe to run again any time.
+
 Prices are not sent; set them in Square. Each upload only adds cards; nothing is removed.
 "@ | Set-Content "$stage\README.txt" -Encoding UTF8
 $zip = "$root\dist\MtgSync-$version.zip"
