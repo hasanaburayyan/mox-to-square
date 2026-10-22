@@ -70,7 +70,7 @@ download check.
 | enrich | `work/enriched.jsonl`, `output/unmatched.csv` |
 | price | `work/priced.jsonl`, `output/needs_manual_price.csv`, `state/tracked.json`; with `--compare-prices` only `output/price_comparison.csv` |
 | build | `output/square_import_<date>[_tag].csv`, `output/import_summary.md`, `output/bulk_detail.csv`, and `output/orphaned_skus.csv` on update runs |
-| images | `cache/images/*.jpg`, `state/images_uploaded.json` |
+| images | `cache/images/*.jpg`, `state/images_uploaded.json`, `state/variation_images.json` |
 
 ## Model A vs Model C
 
@@ -113,14 +113,38 @@ For a library that holds none of the SKUs yet, `--no-square-export` skips step 2
 `mtgsync inventory --quantity-mode set` writes absolute counts. To treat Moxfield as the full
 inventory instead, set `square.quantity_mode: set`; `--zero-missing` only applies in that mode.
 
+## Images: one per item, one per printing
+
+`mtgsync images` (and the one-click upload) attaches images in two passes:
+
+1. **Item image**: one scan per card name, the item's primary picture (highest-value printing
+   in stock, else the oldest). Recorded in `state/images_uploaded.json`.
+2. **Variation images** (`images.variations: true`, default): every printing in stock gets its
+   own scan attached to each of its variations, so picking a variation shows that printing.
+   Conditions and finishes of one printing share a single upload; a scan the item pass already
+   uploaded is reused, and a variation that already carries an image in Square is left alone.
+   Attachment is a catalog upsert that appends the image id to the variation's `image_ids`,
+   with the object's `version` kept so a stale write is rejected rather than clobbering. The
+   printing-to-image map is in `state/variation_images.json`. `--no-variations` skips this
+   pass; `--dry-run` lists what would be uploaded and attached.
+
+Square shows a variation's image in Square Online and the Dashboard when that variation is
+selected. Whether the Point of Sale app shows it in its variation picker depends on the app;
+check one item there before relying on it. With `sku.include_language: false` the English
+and foreign copies of a printing are one variation, which gets the English scan.
+
 ## Non-English cards
 
 Scryfall's `default_cards` file has one object per card (English, or the printed language when
 that is the only one). A non-English Moxfield row whose language has no own object is matched
 to the English object for the same set and collector number; the record keeps the row's
-language and is flagged `lang_fallback`. With `sku.include_language: false` (default) such a
-row shares the English SKU and its quantity is merged in; set it to true to get a `-ja` style
-suffix and its own variation instead.
+language and is flagged `lang_fallback`. Sets that were never printed in English (Foreign
+Black Border, Fourth Edition FBB, Renaissance, Rinascimento) have their one object in another
+language, French for FBB, so a German or Italian row there matches that object the same way.
+With `sku.include_language: false` (default) such a row shares the English SKU and its
+quantity is merged in; set it to true to get a `-ja` style suffix and its own variation
+instead. The image stage uses that one object's scan for every language of the printing;
+switch `scryfall.bulk_type` to `all_cards` (much larger download) for per-language scans.
 
 ## Status / not yet done
 

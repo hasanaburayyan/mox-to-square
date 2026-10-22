@@ -183,7 +183,7 @@ def cmd_build(args: argparse.Namespace, settings: Settings | None = None) -> int
 
 
 def cmd_images(args: argparse.Namespace, settings: Settings | None = None) -> int:
-    from .square_images import SquareClient, load_dotenv, run_images
+    from .square_images import SquareClient, load_dotenv, run_images, run_variation_images
 
     s = settings or _settings(args)
     src = s.path("paths.work") / PRICED_FILENAME
@@ -213,7 +213,21 @@ def cmd_images(args: argparse.Namespace, settings: Settings | None = None) -> in
          f"{len(report.errors)} errors")
     for name in report.not_in_square[:20]:
         _say("  not in Square: " + name)
-    return 1 if report.errors else 0
+    errors = list(report.errors)
+
+    if bool(s.get("images.variations", True)) and not args.no_variations:
+        vreport = run_variation_images(records, cache_dir=s.path("paths.cache"), state_dir=s.path("paths.state"),
+                                       user_agent=str(s.get("scryfall.user_agent")),
+                                       include_language=bool(s.get("sku.include_language", False)),
+                                       dry_run=bool(args.dry_run), client=client, log=_say)
+        _say(f"Variation images: {vreport.planned} printings planned, {vreport.uploaded} uploaded, "
+             f"{vreport.reused} reused, {vreport.attached} variations attached, "
+             f"{vreport.already_done} printings already done, {len(vreport.not_in_square)} SKUs not in Square, "
+             f"{len(vreport.errors)} errors")
+        for sku in vreport.not_in_square[:20]:
+            _say("  not in Square: " + sku)
+        errors.extend(vreport.errors)
+    return 1 if errors else 0
 
 
 def cmd_inventory(args: argparse.Namespace, settings: Settings | None = None) -> int:
@@ -354,6 +368,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("images", help="Stage 4: upload images through the Catalog API")
     sp.add_argument("--dry-run", action="store_true")
+    sp.add_argument("--no-variations", action="store_true",
+                    help="item images only; skip the per-variation (per printing) images")
     sp.set_defaults(func=cmd_images)
 
     sp = sub.add_parser("inventory", help="Set or add stock counts through the Inventory API")

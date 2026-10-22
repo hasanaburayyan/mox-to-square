@@ -134,15 +134,24 @@ class SquareClient:
             if not cursor:
                 return objects
 
-    def create_item_image(self, item_id: str, image_path: Path, caption: str) -> str:
-        body = {"idempotency_key": str(uuid.uuid4()), "object_id": item_id, "is_primary": True,
-                "image": {"type": "IMAGE", "id": "#image",
-                          "image_data": {"caption": caption[:255]}}}
+    def create_image(self, image_path: Path, caption: str, *, object_id: str | None = None,
+                     is_primary: bool = False) -> str:
+        """CreateCatalogImage. With no object_id the image is created unattached, to be
+        referenced from `image_ids` on any number of catalog objects."""
+        body: dict[str, Any] = {"idempotency_key": str(uuid.uuid4()),
+                                "image": {"type": "IMAGE", "id": "#image",
+                                          "image_data": {"caption": caption[:255]}}}
+        if object_id:
+            body["object_id"] = object_id
+            body["is_primary"] = is_primary
         with open(image_path, "rb") as fh:
             files = {"request": (None, json.dumps(body), "application/json"),
                      "image_file": (image_path.name, fh, "image/jpeg")}
             data = self._request("POST", "/v2/catalog/images", files=files)
         return data.get("image", {}).get("id", "")
+
+    def create_item_image(self, item_id: str, image_path: Path, caption: str) -> str:
+        return self.create_image(image_path, caption, object_id=item_id, is_primary=True)
 
 
 def item_ids_by_sku(items: list[dict[str, Any]]) -> dict[str, str]:
@@ -276,4 +285,184 @@ def run_images(records: list[Record], *, cache_dir: Path, state_dir: Path, user_
         except Exception as exc:  # noqa: BLE001 - keep going, report at the end
             report.errors.append(f"{plan.item_name}: {exc}")
             log(f"ERROR {plan.item_name}: {exc}")
+    return report
+
+
+# --- per-variation images ----------------------------------------------------------------
+#
+# Square shows a variation's own image (CatalogItemVariation.image_ids) when that variation is
+# picked, so every printing in stock gets its scan: one upload per printing (Scryfall object),
+# shared by every variation of it (conditions and finishes), attached through a catalog upsert
+# that appends the image id to each variation's image_ids. Existing fields are kept as Square
+# returned them. The item-level image from run_images stays the item's primary picture.
+
+VARIATION_IMAGES_STATE_FILENAME = "variation_images.json"
+_READ_ONLY_OBJECT_KEYS = ("updated_at", "created_at", "catalog_v1_ids")
+
+
+@dataclass
+class VariationImagePlan:
+    printing: str                # Scryfall id of the object every record of this printing matched
+    item_name: str
+    set: str
+    set_name: str
+    collector_number: str
+    image_uri: str
+    skus: list[str] = field(default_factory=list)
+
+    @property
+    def caption(self) -> str:
+        return f"{self.item_name} ({self.set_name} #{self.collector_number})"
+
+
+def choose_variation_images(records: list[Record], include_language: bool = False) -> list[VariationImagePlan]:
+    """One image per printing in stock, listing every SKU (variation) that printing has.
+
+    Records of one printing share the Scryfall object (a language-fallback row carries the
+    object it matched), so the Scryfall id is the printing key. Each SKU goes to exactly one
+    printing: with `sku.include_language` off, an English and a Japanese copy share a SKU,
+    and the variation then gets the English scan (then the non-fallback, then the oldest).
+    """
+    by_sku: dict[str, list[Record]] = defaultdict(list)
+    for r in records:
+        if r.tier == "tracked" and r.image_uri and r.count > 0 and r.scryfall_id:
+            by_sku[record_sku(r, include_language)].append(r)
+    chosen: dict[str, Record] = {}
+    skus_of: dict[str, set[str]] = defaultdict(set)
+    for sku, recs in by_sku.items():
+        best = min(recs, key=lambda r: (r.lang != "en", r.lang_fallback, r.released_at or "9999-99-99", r.set))
+        chosen.setdefault(best.scryfall_id, best)
+        skus_of[best.scryfall_id].add(sku)
+    plans = [VariationImagePlan(printing=sid, item_name=rec.name, set=rec.set, set_name=rec.set_name,
+                                collector_number=rec.collector_number, image_uri=rec.image_uri or "",
+                                skus=sorted(skus_of[sid]))
+             for sid, rec in chosen.items()]
+    plans.sort(key=lambda p: (p.item_name, p.set, p.collector_number))
+    return plans
+
+
+def variations_by_sku(items: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Map every SKU to its ITEM_VARIATION object as ListCatalog embeds it in the item."""
+    out: dict[str, dict[str, Any]] = {}
+    for obj in items:
+        for var in obj.get("item_data", {}).get("variations", []) or []:
+            sku = var.get("item_variation_data", {}).get("sku")
+            if sku:
+                out[str(sku)] = var
+    return out
+
+
+def variation_with_image(variation: dict[str, Any], image_id: str) -> dict[str, Any]:
+    """A copy of the variation object ready to upsert, with image_id appended to image_ids.
+
+    The copy keeps `version` (so Square rejects a stale write instead of clobbering a newer
+    one) and every other field as returned; only read-only timestamps are dropped.
+    """
+    obj = {k: v for k, v in variation.items() if k not in _READ_ONLY_OBJECT_KEYS}
+    obj.setdefault("type", "ITEM_VARIATION")
+    data = dict(obj.get("item_variation_data", {}))
+    ids = [str(i) for i in (data.get("image_ids") or [])]
+    if image_id not in ids:
+        ids.append(image_id)
+    data["image_ids"] = ids
+    obj["item_variation_data"] = data
+    return obj
+
+
+@dataclass
+class VariationImageReport:
+    planned: int = 0                 # printings with an image and stock
+    uploaded: int = 0                # new images created in Square
+    reused: int = 0                  # printings whose image already existed (item stage or sibling)
+    attached: int = 0                # variations that got the image id
+    already_done: int = 0            # printings where every variation already had it
+    not_in_square: list[str] = field(default_factory=list)   # SKUs missing from the catalog
+    errors: list[str] = field(default_factory=list)
+
+
+def run_variation_images(records: list[Record], *, cache_dir: Path, state_dir: Path, user_agent: str,
+                         include_language: bool, dry_run: bool, client: SquareClient | None,
+                         log: Callable[[str], None] = print, batch_size: int = 100) -> VariationImageReport:
+    plans = choose_variation_images(records, include_language)
+    report = VariationImageReport(planned=len(plans))
+    state_path = state_dir / VARIATION_IMAGES_STATE_FILENAME
+    state = load_images_state(state_path)
+    # Images the item stage already uploaded for these printings: reuse, never upload twice.
+    item_state = load_images_state(state_dir / IMAGES_STATE_FILENAME)
+    known_images: dict[str, str] = {v["scryfall_id"]: v["image_id"] for v in item_state.values()
+                                    if isinstance(v, dict) and v.get("scryfall_id") and v.get("image_id")}
+    for sid, entry in state.items():
+        if isinstance(entry, dict) and entry.get("image_id"):
+            known_images[sid] = entry["image_id"]
+
+    var_by_sku: dict[str, dict[str, Any]] = {}
+    if client is not None:
+        var_by_sku = variations_by_sku(client.list_items())
+        log(f"Square catalog: {len(var_by_sku)} variation SKUs found")
+
+    pending: list[tuple[VariationImagePlan, str, list[dict[str, Any]]]] = []
+
+    def flush() -> None:
+        if not pending:
+            return
+        objects = [o for _, _, objs in pending for o in objs]
+        names = ", ".join(p.caption for p, _, _ in pending[:3]) + (" ..." if len(pending) > 3 else "")
+        try:
+            assert client is not None
+            client.upsert_objects(objects)
+            for plan, image_id, objs in pending:
+                report.attached += len(objs)
+                state[plan.printing] = {"item_name": plan.item_name, "set": plan.set,
+                                        "collector_number": plan.collector_number,
+                                        "image_id": image_id, "skus": plan.skus}
+            save_images_state(state_path, state)
+            log(f"attached images to {len(objects)} variations ({names})")
+        except Exception as exc:  # noqa: BLE001 - keep going, report at the end
+            report.errors.append(f"attach {names}: {exc}")
+            log(f"ERROR attaching {names}: {exc}")
+        pending.clear()
+
+    for plan in plans:
+        present = [var_by_sku[s] for s in plan.skus if s in var_by_sku]
+        if client is not None:
+            report.not_in_square.extend(s for s in plan.skus if s not in var_by_sku)
+            if not present:
+                continue
+        image_id = known_images.get(plan.printing)
+        if image_id is None:
+            # Square is the source of truth: a sibling variation of this printing that already
+            # carries an image means the scan is there, whatever this machine's state says.
+            image_id = next((str(v["item_variation_data"]["image_ids"][0]) for v in present
+                             if v.get("item_variation_data", {}).get("image_ids")), None)
+        todo = [v for v in present
+                if image_id is None or image_id not in (v.get("item_variation_data", {}).get("image_ids") or [])]
+        if client is not None and not todo:
+            report.already_done += 1
+            continue
+        if dry_run:
+            what = "reuse " + image_id if image_id else "upload " + plan.image_uri
+            targets = len(todo) if client is not None else len(plan.skus)
+            log(f"[dry-run] {plan.caption}: {what} -> {targets} variation(s): {', '.join(plan.skus)}")
+            continue
+        assert client is not None
+        if image_id is None:
+            try:
+                img_path = download_image(plan.image_uri, cache_dir / "images" / f"{plan.printing}.jpg",
+                                          user_agent)
+                image_id = client.create_image(img_path, plan.caption)
+                if not image_id:
+                    raise SquareApiError("CreateCatalogImage returned no image id")
+                report.uploaded += 1
+                known_images[plan.printing] = image_id
+                log(f"uploaded {plan.caption} ({image_id})")
+            except Exception as exc:  # noqa: BLE001
+                report.errors.append(f"{plan.caption}: {exc}")
+                log(f"ERROR {plan.caption}: {exc}")
+                continue
+        else:
+            report.reused += 1
+        pending.append((plan, image_id, [variation_with_image(v, image_id) for v in todo]))
+        if sum(len(objs) for _, _, objs in pending) >= batch_size:
+            flush()
+    flush()
     return report

@@ -71,6 +71,13 @@ scryfall:
   bulk_type: default_cards
   user_agent: "mtgsync/0.1 (Moxfield->Square collection sync)"
 
+images:
+  # true: after the one image per item, every printing in stock gets its own scan attached to
+  # each of its variations (conditions and finishes share one upload). Square shows the
+  # variation's image when it is selected in Square Online and the Dashboard; check your
+  # Point of Sale app on one item before relying on it there. false: item images only.
+  variations: true
+
 moxfield:
   # Moxfield is the intake log: export, import to Square, then delete the rows from the
   # Moxfield collection so the next export only carries new stock (see square.quantity_mode).

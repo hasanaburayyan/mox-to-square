@@ -23,7 +23,7 @@ from .records import ENRICHED_FILENAME, PRICED_FILENAME, write_jsonl
 from .scryfall import load_index
 from .square_build import build_rows
 from .square_catalog import apply_catalog, plan_catalog
-from .square_images import SquareClient, load_dotenv, run_images
+from .square_images import SquareClient, load_dotenv, run_images, run_variation_images
 from .square_inventory import InventoryError, run_inventory
 
 UPLOADS_STATE_FILENAME = "uploads.json"
@@ -47,6 +47,8 @@ class UploadReport:
     items_extended: int = 0
     inventory_applied: int = 0
     images_uploaded: int = 0
+    variation_images_uploaded: int = 0
+    variations_with_image: int = 0
     dry_run: bool = False
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
@@ -184,6 +186,18 @@ def _upload(moxfield_csv: Path, s: Settings, report: UploadReport, *, dry_run: b
     report.errors.extend(img.errors)
     log(f"  {img.uploaded} images uploaded, {img.already_done} already had one")
 
+    if bool(s.get("images.variations", True)):
+        log("Attaching each printing's scan to its variations ...")
+        vimg = run_variation_images(records, cache_dir=s.path("paths.cache"), state_dir=state_dir,
+                                    user_agent=str(s.get("scryfall.user_agent")),
+                                    include_language=bool(s.get("sku.include_language", False)),
+                                    dry_run=False, client=client, log=lambda m: None)
+        report.variation_images_uploaded = vimg.uploaded
+        report.variations_with_image = vimg.attached
+        report.errors.extend(vimg.errors)
+        log(f"  {vimg.uploaded} printing scans uploaded, {vimg.reused} reused, "
+            f"{vimg.attached} variations got an image, {vimg.already_done} printings already done")
+
     _record_upload(uploads_path, fh, moxfield_csv, report, dry_run=False)
     _write_report(out / "upload_report.md", moxfield_csv, report)
     log("Done." if report.ok else "Finished with errors.")
@@ -207,7 +221,9 @@ def _write_report(path: Path, csv_path: Path, r: UploadReport) -> None:
              f"| Cards added to stock | {r.quantity_total} |", f"| New items created | {r.items_created} |",
              f"| New variations created | {r.variations_created} |",
              f"| Existing items extended | {r.items_extended} |",
-             f"| Inventory changes applied | {r.inventory_applied} |", f"| Images uploaded | {r.images_uploaded} |"]
+             f"| Inventory changes applied | {r.inventory_applied} |", f"| Images uploaded | {r.images_uploaded} |",
+             f"| Printing scans uploaded | {r.variation_images_uploaded} |",
+             f"| Variations given an image | {r.variations_with_image} |"]
     if r.warnings:
         lines += ["", "## Warnings", ""] + [f"- {w}" for w in r.warnings]
     if r.errors:

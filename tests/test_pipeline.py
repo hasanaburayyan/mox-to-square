@@ -15,6 +15,7 @@ class FakeSquare:
         self.changes: list[dict] = []
         self.upserts: list[dict] = []
         self.images: list[str] = []
+        self.printing_images: list[str] = []
         self._n = 0
 
     def _id(self):
@@ -36,6 +37,7 @@ class FakeSquare:
     def upsert_objects(self, objects):
         mappings = []
         for o in objects:
+            o = {"type": "ITEM_VARIATION"} | o      # tracking upserts re-send the stored object, type-less here
             if o["type"] == "CATEGORY":
                 cid = self._id(); mappings.append({"client_object_id": o["id"], "object_id": cid})
                 self.categories.append({"id": cid, "category_data": o["category_data"]})
@@ -45,11 +47,16 @@ class FakeSquare:
                 for v in o["item_data"]["variations"]:
                     vs.append({"id": self._id(), "created_at": "t", "item_variation_data": dict(v["item_variation_data"])})
                 self.items.append({"id": iid, "item_data": {"name": o["item_data"]["name"], "variations": vs}})
-            elif o["type"] == "ITEM_VARIATION":
+            elif o["type"] == "ITEM_VARIATION" and o["id"].startswith("#"):
                 item = next(i for i in self.items if i["id"] == o["item_variation_data"]["item_id"])
                 item["item_data"]["variations"].append({"id": self._id(), "created_at": "t",
                                                         "item_variation_data": dict(o["item_variation_data"])})
-            else:  # tracking upsert of an existing variation
+            elif o["type"] == "ITEM_VARIATION":   # update of an existing variation (tracking, image_ids)
+                for item in self.items:
+                    for v in item["item_data"]["variations"]:
+                        if v["id"] == o["id"]:
+                            v["item_variation_data"] = dict(o["item_variation_data"])
+            else:
                 pass
         self.upserts.extend(objects)
         return {"id_mappings": mappings}
@@ -57,9 +64,15 @@ class FakeSquare:
     def change_inventory(self, changes):
         self.changes.extend(changes)
 
+    def create_image(self, path, caption, *, object_id=None, is_primary=False):
+        if object_id:
+            self.images.append(object_id)
+        else:
+            self.printing_images.append(caption)
+        return f"IMG{self._id()}"
+
     def create_item_image(self, item_id, path, caption):
-        self.images.append(item_id)
-        return "IMG"
+        return self.create_image(path, caption, object_id=item_id, is_primary=True)
 
 
 def test_upload_twice_is_refused_and_second_batch_extends(project_root: Path, moxfield_csv: Path, monkeypatch):
@@ -83,6 +96,20 @@ def test_upload_twice_is_refused_and_second_batch_extends(project_root: Path, mo
     assert len(sq.images) == r.images_uploaded == r.items_total
     assert sq.categories[0]["category_data"]["name"] == "MTG Singles"
     assert (project_root / "output" / "upload_report.md").exists()
+    # Every variation carries its printing's scan; printings whose scan became the item image
+    # were reused rather than uploaded again.
+    all_vars = [v for i in sq.items for v in i["item_data"]["variations"]]
+    assert r.variations_with_image == len(all_vars) == 16
+    assert all(v["item_variation_data"].get("image_ids") for v in all_vars)
+    printings = {v["item_variation_data"]["sku"].rsplit("-", 2)[0] for v in all_vars}
+    assert r.variation_images_uploaded == len(sq.printing_images) == len(printings) - r.images_uploaded
+    bolt = next(i for i in sq.items if i["item_data"]["name"] == "Lightning Bolt")
+    bolt_imgs = {v["item_variation_data"]["sku"]: v["item_variation_data"]["image_ids"]
+                 for v in bolt["item_data"]["variations"]}
+    # sku.include_language is on in settings.yaml: the English and German (fallback) copies share
+    # the English scan; the Japanese copy is its own printing with its own scan.
+    english = {tuple(ids) for sku, ids in bolt_imgs.items() if sku.startswith("sta-42-") and not sku.endswith("-ja")}
+    assert len(english) == 1 and tuple(bolt_imgs["sta-42-nf-nm-ja"]) not in english
 
     # The same file again is refused before touching Square.
     before = (len(sq.changes), len(sq.upserts))

@@ -30,6 +30,7 @@ _DEFAULTS: dict[str, Any] = {
                 "scg": {"enabled": False, "rate_limit_seconds": 2, "max_cards": 200,
                         "cache_ttl_hours": 168}},
     "scryfall": {"cache_ttl_hours": 24, "user_agent": "mtgsync/0.1"},
+    "images": {"variations": True},
     "moxfield": {"subtract_tradelist": False, "english_only": False},
     "paths": {"cache": "cache", "work": "work", "output": "output", "state": "state"},
 }
